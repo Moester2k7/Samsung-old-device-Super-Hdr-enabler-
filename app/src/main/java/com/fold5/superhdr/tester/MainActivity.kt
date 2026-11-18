@@ -125,8 +125,8 @@ class MainActivity : AppCompatActivity() {
 
         // 右上角纯白 #FFFFFF SDR 窗口基准对照块（用于肉眼对比画面高光是否显著亮于系统纯白 UI！）
         val sdrRefBox = TextView(this).apply {
-            text = "SDR 纯白基准
-#FFFFFF"
+            // 第 1 处（sdrRefBox 内）：合并为单行
+            text = "SDR 纯白基准\n#FFFFFF"
             setTextColor(Color.BLACK)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             gravity = Gravity.CENTER
@@ -341,9 +341,7 @@ class MainActivity : AppCompatActivity() {
         controls.addView(btnBuildMagisk)
 
         logOutputView = TextView(this).apply {
-            text = "点击「1. Root 诊断屏幕参数」可申请 su 权限并读取本机内外屏 hdrSdrRatio、FloatingFeature 与 DisplayConfig 状态。
-提示：观察画面高光与右上角『#FFFFFF 纯白基准块』的亮度差——若画面高光明显比纯白块更亮、更有发光感，说明窗口局部 Super HDR 硬件激发已生效！"
-            setTextColor(Color.rgb(190, 205, 220))
+            text = "点击「1. Root 诊断屏幕参数」可申请 su 权限并读取本机内外屏 hdrSdrRatio、FloatingFeature 与 DisplayConfig 状态。\n提示：观察画面高光与右上角『#FFFFFF 纯白基准块』的亮度差——若画面高光明显比纯白块更亮、更有发光感，说明窗口局部 Super HDR 硬件激发已生效！"            setTextColor(Color.rgb(190, 205, 220))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
             setPadding(dp(10), dp(10), dp(10), dp(10))
@@ -486,11 +484,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun appendLog(msg: String) {
-        logOutputView.text = msg + "
-
-" + logOutputView.text
-    }
+   private fun appendLog(msg: String) {
+    logOutputView.text = msg + "\n\n" + logOutputView.text
+}
 
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()

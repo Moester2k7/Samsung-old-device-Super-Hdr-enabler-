@@ -341,7 +341,8 @@ class MainActivity : AppCompatActivity() {
         controls.addView(btnBuildMagisk)
 
         logOutputView = TextView(this).apply {
-            text = "点击「1. Root 诊断屏幕参数」可申请 su 权限并读取本机内外屏 hdrSdrRatio、FloatingFeature 与 DisplayConfig 状态。\n提示：观察画面高光与右上角『#FFFFFF 纯白基准块』的亮度差——若画面高光明显比纯白块更亮、更有发光感，说明窗口局部 Super HDR 硬件激发已生效！"            setTextColor(Color.rgb(190, 205, 220))
+            text = "点击「1. Root 诊断屏幕参数」可申请 su 权限并读取本机内外屏 hdrSdrRatio、FloatingFeature 与 DisplayConfig 状态。\n提示：观察画面高光与右上角『#FFFFFF 纯白基准块』的亮度差——若画面高光明显比纯白块更亮、更有发光感，说明窗口局部 Super HDR 硬件激发已生效！"           
+            setTextColor(Color.rgb(190, 205, 220))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
             setPadding(dp(10), dp(10), dp(10), dp(10))

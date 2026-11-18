@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="xposed_scope">
+        <item>android</item>
+        <item>com.sec.android.gallery3d</item>
+        <item>com.android.settings</item>
+        <item>com.google.android.apps.photos</item>
+        <item>com.fold5.superhdr.tester</item>
+    </string-array>
+</resources>

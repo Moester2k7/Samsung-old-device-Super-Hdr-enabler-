@@ -3,10 +3,23 @@
 
     <application
         android:allowBackup="true"
-        android:label="Fold5 SuperHDR Lab"
+        android:label="Fold5 SuperHDR Lab v3"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
         android:theme="@style/Theme.Material3.Dark.NoActionBar">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Unlock Super HDR (0% Area Limit, sdrToHdrRatioSpline 3.0x, 1500nits Cap &amp; Realtime Gainmap) for Galaxy Z Fold 5" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
 
         <activity
             android:name=".MainActivity"

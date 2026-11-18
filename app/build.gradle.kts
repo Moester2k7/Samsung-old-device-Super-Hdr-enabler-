@@ -11,8 +11,8 @@ android {
         applicationId = "com.fold5.superhdr.tester"
         minSdk = 34
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "3.0.0"
     }
 
     buildTypes {
@@ -33,6 +33,7 @@ android {
 }
 
 dependencies {
+    compileOnly("de.robv.android.xposed:api:82")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

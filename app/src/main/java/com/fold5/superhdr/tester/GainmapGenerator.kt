@@ -104,7 +104,7 @@ object GainmapGenerator {
             val rowOffset = y * gmW
             for (x in 0 until gmW) {
                 if (x < splitX) {
-                    gmPixels[rowOffset + x] = Color.rgb(0, 0, 0)
+                    gmPixels[rowOffset + x] = Color.BLACK
                     continue
                 }
                 val c = pixels[rowOffset + x]
@@ -117,7 +117,7 @@ object GainmapGenerator {
                     val v = (norm.pow(1.5f) * 255f).toInt().coerceIn(0, 255)
                     gmPixels[rowOffset + x] = Color.rgb(v, v, v)
                 } else {
-                    gmPixels[rowOffset + x] = Color.rgb(0, 0, 0)
+                    gmPixels[rowOffset + x] = Color.BLACK
                 }
             }
         }

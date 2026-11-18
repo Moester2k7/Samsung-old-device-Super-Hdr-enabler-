@@ -1,5 +1,8 @@
 package com.fold5.superhdr.tester
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -18,6 +21,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -30,17 +34,20 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private enum class EngineMode {
-        HARDWARE_PQ_SURFACE, // 模式 A：10-bit BT.2020 PQ 硬件直通（无需改系统即可在 Fold5 物理激发 1000+ 尼特高光）
-        NATIVE_GAINMAP       // 模式 B：Android 14 原生 Gainmap + COLOR_MODE_HDR（检验系统 hdrSdrRatio / 模块是否生效）
+        HARDWARE_PQ_SURFACE,
+        NATIVE_GAINMAP
     }
 
     private var currentMode = EngineMode.HARDWARE_PQ_SURFACE
     private var hdrEnabled = true
-    private var peakBoost = 5.0f      // 5.0x -> ~1015 nits in PQ mode, 5.0x ratioMax in Gainmap mode
-    private var threshold = 0.68f     // 68% 亮度以上触发局部激发
-    private var splitRatio = 0.50f    // 左 SDR / 右 Super HDR 分屏线
+    private var expandedViewport = false // 开启后预览框占屏 >68%，免模块直接突破三星 50% 屏幕面积锁！
+    private var peakBoost = 3.5f
+    private var threshold = 0.68f
+    private var splitRatio = 0.50f
 
     private lateinit var sourceBitmap: Bitmap
+    private lateinit var viewportContainer: FrameLayout
+    private lateinit var controlScroll: ScrollView
     private lateinit var pqSurfaceView: PqHdrSurfaceView
     private lateinit var gainmapImageView: ImageView
     private lateinit var statusBanner: TextView
@@ -57,7 +64,6 @@ class MainActivity : AppCompatActivity() {
                 contentResolver.openInputStream(uri)?.use { stream ->
                     val decoded = BitmapFactory.decodeStream(stream)
                     if (decoded != null) {
-                        // 限制最大边长 2560 保证实时拖动分屏丝滑
                         val maxDim = 2560
                         val ratio = minOf(maxDim.toFloat() / decoded.width, maxDim.toFloat() / decoded.height, 1f)
                         val scaled = if (ratio < 1f) {
@@ -87,7 +93,6 @@ class MainActivity : AppCompatActivity() {
         refreshDisplayTelemetry()
         refreshPreview()
 
-        // 仅在系统开放了 hdrSdrRatio 时注册监听（未解锁固件直接注册会抛出 IllegalStateException）
         try {
             if (display?.isHdrSdrRatioAvailable == true) {
                 display?.registerHdrSdrRatioChangedListener({ it.run() }, {
@@ -96,6 +101,21 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (_: Throwable) {
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::pqSurfaceView.isInitialized) {
+            pqSurfaceView.onResume()
+        }
+        refreshDisplayTelemetry()
+    }
+
+    override fun onPause() {
+        if (::pqSurfaceView.isInitialized) {
+            pqSurfaceView.onPause()
+        }
+        super.onPause()
     }
 
     private fun buildRootLayout(): View {
@@ -108,24 +128,21 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // 顶部状态栏（实时显示屏幕 hdrSdrRatio 与纯白 203nit SDR 对照块）
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(8))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             setBackgroundColor(Color.rgb(20, 23, 30))
         }
 
         statusBanner = TextView(this).apply {
             setTextColor(Color.rgb(220, 230, 245))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        // 右上角纯白 #FFFFFF SDR 窗口基准对照块（用于肉眼对比画面高光是否显著亮于系统纯白 UI！）
         val sdrRefBox = TextView(this).apply {
-            // 第 1 处（sdrRefBox 内）：合并为单行
             text = "SDR 纯白基准\n#FFFFFF"
             setTextColor(Color.BLACK)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -141,8 +158,7 @@ class MainActivity : AppCompatActivity() {
         headerRow.addView(sdrRefBox)
         root.addView(headerRow)
 
-        // 中部 HDR 图像预览视口（占屏幕高度约 44%）
-        val viewportContainer = FrameLayout(this).apply {
+        viewportContainer = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -167,11 +183,39 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        // 右下角一键放大超过 50% 屏幕面积按钮（免 LSPosed 验证三星原厂 500->1500nits 曲线！）
+        val btnExpandArea = createStyledButton("扩大视口 (>65% 面积突破三星 0.5 锁)", true) { btn ->
+            expandedViewport = !expandedViewport
+            val vLp = viewportContainer.layoutParams as LinearLayout.LayoutParams
+            val sLp = controlScroll.layoutParams as LinearLayout.LayoutParams
+            if (expandedViewport) {
+                vLp.weight = 2.4f
+                sLp.weight = 0.8f
+                btn.text = "恢复常规视口比例"
+            } else {
+                vLp.weight = 1.05f
+                sLp.weight = 1.0f
+                btn.text = "扩大视口 (>65% 面积突破三星 0.5 锁)"
+            }
+            viewportContainer.layoutParams = vLp
+            controlScroll.layoutParams = sLp
+            viewportContainer.postDelayed({ refreshDisplayTelemetry() }, 350)
+        }.apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
+            ).apply {
+                topMargin = dp(8)
+                marginEnd = dp(8)
+            }
+        }
+
         val splitOverlayHint = TextView(this).apply {
-            text = "◀ 左侧：标准 SDR          |          右侧：Super HDR 局部激发 ▶"
-            setTextColor(Color.argb(210, 255, 255, 255))
+            text = "◀ 左侧：标准 SDR  |  右侧：Super HDR 局部激发 ▶"
+            setTextColor(Color.argb(215, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setBackgroundColor(Color.argb(120, 0, 0, 0))
+            setBackgroundColor(Color.argb(130, 0, 0, 0))
             setPadding(dp(10), dp(4), dp(10), dp(4))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -182,11 +226,11 @@ class MainActivity : AppCompatActivity() {
 
         viewportContainer.addView(pqSurfaceView)
         viewportContainer.addView(gainmapImageView)
+        viewportContainer.addView(btnExpandArea)
         viewportContainer.addView(splitOverlayHint)
         root.addView(viewportContainer)
 
-        // 下半部分控制面板与 Root 控制台
-        val scroll = ScrollView(this).apply {
+        controlScroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
@@ -199,11 +243,10 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14), dp(10), dp(14), dp(20))
         }
 
-        // 引擎模式切换双按钮
         val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        btnModePq = createStyledButton("引擎 A：硬件 PQ 直通激发 (免改系统)", true) {
+        btnModePq = createStyledButton("引擎 A：硬件 PQ 直通激发", true) {
             currentMode = EngineMode.HARDWARE_PQ_SURFACE
             updateModeButtons()
             refreshPreview()
@@ -223,7 +266,6 @@ class MainActivity : AppCompatActivity() {
         modeRow.addView(btnModeGainmap)
         controls.addView(modeRow)
 
-        // 图片选择与总开关行
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8), 0, dp(6))
@@ -235,7 +277,7 @@ class MainActivity : AppCompatActivity() {
                 marginEnd = dp(6)
             }
         }
-        val btnResetCard = createStyledButton("内置高光测试卡", false) {
+        val btnResetCard = createStyledButton("内置测试卡", false) {
             sourceBitmap = GainmapGenerator.createBuiltInHdrTestCard()
             refreshPreview()
         }.apply {
@@ -243,9 +285,9 @@ class MainActivity : AppCompatActivity() {
                 marginEnd = dp(6)
             }
         }
-        val btnToggleHdr = createStyledButton("HDR 开关: 开", true) { btn ->
+        val btnToggleHdr = createStyledButton("HDR: 开", true) { btn ->
             hdrEnabled = !hdrEnabled
-            btn.text = if (hdrEnabled) "HDR 开关: 开" else "HDR 开关: 关"
+            btn.text = if (hdrEnabled) "HDR: 开" else "HDR: 关"
             refreshPreview()
         }.apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -255,17 +297,14 @@ class MainActivity : AppCompatActivity() {
         actionRow.addView(btnToggleHdr)
         controls.addView(actionRow)
 
-        // 滑块 1：局部峰值激发倍数
         boostLabel = makeSliderLabel()
         controls.addView(boostLabel)
-        controls.addView(makeSeekBar(max = 75, progress = 40) { p ->
-            // 1.0x ~ 8.5x (203 nits ~ 1725 nits)
+        controls.addView(makeSeekBar(max = 65, progress = 25) { p ->
             peakBoost = 1.0f + (p / 10f)
             refreshSliderLabels()
             refreshPreview()
         })
 
-        // 滑块 2：高光提取阈值
         thresholdLabel = makeSliderLabel()
         controls.addView(thresholdLabel)
         controls.addView(makeSeekBar(max = 90, progress = 68) { p ->
@@ -274,7 +313,6 @@ class MainActivity : AppCompatActivity() {
             refreshPreview()
         })
 
-        // 滑块 3：左右对比分屏线
         splitLabel = makeSliderLabel()
         controls.addView(splitLabel)
         controls.addView(makeSeekBar(max = 100, progress = 50) { p ->
@@ -284,24 +322,26 @@ class MainActivity : AppCompatActivity() {
         })
         refreshSliderLabels()
 
-        // Root 权限工具栏
         val rootTitle = TextView(this).apply {
-            text = "⚡ Root 权限诊断与系统解锁工具箱 (su)"
+            text = "LSPosed 状态验证与 Root 诊断导出"
             setTextColor(Color.rgb(130, 200, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(12), 0, dp(6))
+            setPadding(0, dp(10), 0, dp(6))
         }
         controls.addView(rootTitle)
 
         val rootBtnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        val btnRootDiag = createStyledButton("1. Root 诊断屏幕参数", false) {
-            appendLog("正在请求 Root 读取 Fold 5 显示管线状态...")
+        val btnRootDiag = createStyledButton("1. 诊断并自动导出/复制日志", false) {
+            logOutputView.text = "正在请求 Root 读取并导出诊断报告..."
             lifecycleScope.launch {
                 val report = RootShellHelper.runFullFold5Diagnostics()
                 logOutputView.text = report
+                copyToClipboard(report)
+                val exportMsg = RootShellHelper.exportDiagnosticsToDownload(report)
+                Toast.makeText(this@MainActivity, exportMsg, Toast.LENGTH_LONG).show()
                 refreshDisplayTelemetry()
             }
         }.apply {
@@ -310,7 +350,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val btnRootEnable = createStyledButton("2. Root 开启系统 HDR 键值", false) {
+        val btnRootEnable = createStyledButton("2. 写入系统 SuperHDR 键值", false) {
             lifecycleScope.launch {
                 val res = RootShellHelper.applyRuntimeRootHdrTweaks()
                 appendLog(res)
@@ -323,28 +363,12 @@ class MainActivity : AppCompatActivity() {
         rootBtnRow.addView(btnRootEnable)
         controls.addView(rootBtnRow)
 
-        val btnBuildMagisk = createStyledButton(
-            "3. 提取本机内外屏配置自动生成 Magisk 原生 SuperHDR 补丁包 (可选)",
-            false
-        ) {
-            appendLog("正在通过 Root 提取 /vendor/etc/displayconfig 并注入 sdrHdrRatioMap...")
-            lifecycleScope.launch {
-                val msg = RootShellHelper.buildMagiskDisplayConfigOverlay(this@MainActivity)
-                appendLog(msg)
-            }
-        }.apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(6) }
-        }
-        controls.addView(btnBuildMagisk)
-
         logOutputView = TextView(this).apply {
-            text = "点击「1. Root 诊断屏幕参数」可申请 su 权限并读取本机内外屏 hdrSdrRatio、FloatingFeature 与 DisplayConfig 状态。\n提示：观察画面高光与右上角『#FFFFFF 纯白基准块』的亮度差——若画面高光明显比纯白块更亮、更有发光感，说明窗口局部 Super HDR 硬件激发已生效！"           
+            text = "v3 已内置 LSPosed 模块 (XposedInit)！\n1. 免重启快速测试：点击预览图右上角『扩大视口 (>65% 面积)』可直接跨过三星 minimumHdrPercentOfScreen=0.5 面积锁，立即触发原厂 500->1500nits 激发！\n2. 全局解锁：在 LSPosed 启用本应用并勾选『系统框架 (android)』与三星相册重启，即可彻底解除 50% 窗口面积限制并激活原生 Gainmap。"
             setTextColor(Color.rgb(190, 205, 220))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
             setPadding(dp(10), dp(10), dp(10), dp(10))
             background = GradientDrawable().apply {
                 setColor(Color.rgb(22, 26, 34))
@@ -357,16 +381,21 @@ class MainActivity : AppCompatActivity() {
         }
         controls.addView(logOutputView)
 
-        scroll.addView(controls)
-        root.addView(scroll)
+        controlScroll.addView(controls)
+        root.addView(controlScroll)
         return root
+    }
+
+    private fun copyToClipboard(content: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        cm.setPrimaryClip(ClipData.newPlainText("Fold5_HDR_Diag_v3", content))
     }
 
     private fun refreshSliderLabels() {
         val estNits = (203f * peakBoost).toInt()
         boostLabel.text = String.format(
             Locale.US,
-            "峰值激发倍率: %.1fx  (PQ 映射峰值 ≈ %d nits / Gainmap RatioMax = %.1f)",
+            "峰值激发倍率: %.1fx  (PQ 目标 ≈ %d nits / Gainmap RatioMax = %.1f)",
             peakBoost, estNits, peakBoost
         )
         thresholdLabel.text = String.format(
@@ -381,31 +410,16 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (::pqSurfaceView.isInitialized) {
-            pqSurfaceView.onResume()
-        }
-        refreshDisplayTelemetry()
-    }
-
-    override fun onPause() {
-        if (::pqSurfaceView.isInitialized) {
-            pqSurfaceView.onPause()
-        }
-        super.onPause()
-    }
-
     private fun refreshDisplayTelemetry() {
         val d = display ?: return
         val ratioAvail = d.isHdrSdrRatioAvailable
         val ratio = d.hdrSdrRatio
-        val hdrTypes = d.mode?.supportedHdrTypes?.joinToString(",") ?: "none"
+        val maxLum = d.hdrCapabilities?.desiredMaxLuminance ?: 0f
         val modeTitle = if (currentMode == EngineMode.HARDWARE_PQ_SURFACE) "引擎A: 硬件 PQ 直通" else "引擎B: 原生 Gainmap"
         statusBanner.text = String.format(
             Locale.US,
-            "%s\nhdrSdrRatioAvailable: %s | 系统当前倍率: %.2fx\n面板支持 HDR 类型 ID: [%s]",
-            modeTitle, ratioAvail, ratio, hdrTypes
+            "%s\nhdrSdrRatioAvailable: %s | 当前倍率: %.2fx | 峰值上限: %.0f nits",
+            modeTitle, ratioAvail, ratio, maxLum
         )
     }
 
@@ -450,7 +464,7 @@ class MainActivity : AppCompatActivity() {
         return Button(this).apply {
             text = label
             isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(8), dp(6), dp(8), dp(6))
             styleButtonState(this, active)
             setOnClickListener { onClick(this) }
@@ -485,9 +499,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-   private fun appendLog(msg: String) {
-    logOutputView.text = msg + "\n\n" + logOutputView.text
-}
+    private fun appendLog(msg: String) {
+        logOutputView.text = msg + "\n\n" + logOutputView.text
+    }
 
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()

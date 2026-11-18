@@ -1,0 +1,1 @@
+# Samsung-old-device-Super-Hdr-enabler-

@@ -29,27 +29,22 @@ class XposedInit : IXposedHookLoadPackage {
             return
         }
 
-        if (lpparam.packageName == "android" ||
-            lpparam.packageName == "com.sec.android.gallery3d" ||
-            lpparam.packageName == "com.android.settings" ||
-            lpparam.packageName == "com.google.android.apps.photos"
-        ) {
-            XposedBridge.log("$TAG: Loaded in ${lpparam.packageName} (process=${lpparam.processName})")
-        }
+        // 所有已在 LSPosed 中勾选的进程均记录加载日志
+        XposedBridge.log("$TAG: Loaded in ${lpparam.packageName} (process=${lpparam.processName})")
 
         // 1. 解锁三星 One UI SemFloatingFeature 中的 PhotoHDR / HW_HDR / Super HDR 机型锁
         hookSamsungFloatingFeature(lpparam)
 
-        // 2. 修复 Fold 5 虚标的 400/450 nits 静态峰值上限 -> 1500 nits (与硬件 sdrToHdrSpline 对齐)
+        // 2. 修复 Fold 5 虚标的 400/450 nits 静态峰值上限 -> 1500 nits；并伪造 isHdrSdrRatioAvailable=true
         hookHdrCapabilities()
 
         if (lpparam.packageName == "android") {
             // 3. 核心突破：针对 Fold 5 (Android 17 / One UI 9) 实机 services.jar 逆向定位的真实拦截链路
+            //    同时 Hook MdnieScenarioControlService 解除 gallery 专属白名单
             hookSystemServerHdrGatekeepers(lpparam)
-        } else if (lpparam.packageName != "com.android.settings" &&
-            lpparam.packageName != "com.fold5.superhdr.tester"
-        ) {
-            // 4. 在被勾选的第三方相册/社交应用中自动启用 HDR 窗口并为普通 SDR 大图实时注入 Gainmap
+            hookMdnieGalleryWhitelist(lpparam)
+        } else {
+            // 4. 所有应用（无白名单限制）：自动启用 HDR 窗口并为普通 SDR 大图实时注入 Gainmap
             hookClientAppAutoGainmap()
         }
     }
@@ -104,8 +99,20 @@ class XposedInit : IXposedHookLoadPackage {
                 }
             })
         }
-        // 注：不再在客户端强制伪造 Display.isHdrSdrRatioAvailable() = true，避免遮蔽 system_server 真实状态；
-        // Fold 5 原生 LocalDisplayAdapter 已开启 mUseSurfaceControlBrightness，在解锁比率曲线后会真实上报 1.0~3.0x。
+
+        // 【关键修复 Engine B】
+        // ViewRootImpl.updateColorModeIfNeeded() 在 offset 0x001a 处调用
+        // Display.isHdrSdrRatioAvailable() — 若返回 false，会将 colorMode 从 HDR(2) 强制
+        // 回退为 WCG(1) 并将 hdrEnabled=false 传给 HdrRenderState.setDesiredHdrSdrRatio()，
+        // 导致 SurfaceFlinger 看不到 HDR 层、hdrSdrRatio 恒为 1.00x。
+        // 因此必须对所有进程强制返回 true。
+        runCatching {
+            XposedBridge.hookAllMethods(Display::class.java, "isHdrSdrRatioAvailable", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    param.result = true
+                }
+            })
+        }.onFailure { XposedBridge.log("$TAG: hookHdrCapabilities/isHdrSdrRatioAvailable failed: $it") }
     }
 
     /**
@@ -423,7 +430,58 @@ class XposedInit : IXposedHookLoadPackage {
         }
     }
 
-    private fun getObjectSafe(target: Any?, fieldName: String): Any? {
+    /**
+     * Hook MdnieScenarioControlService.setUIMode() 解除 Samsung 对 PhotoHDR/VideoHDR
+     * 的 gallery 专属白名单限制（services.jar 反编译：FrontPackageName.equalsIgnoreCase("com.sec.android.gallery3d")）。
+     * 策略：直接 Hook getAppSettingState / mGalleryAppState 相关字段为 true，
+     * 以及 Hook setUIMode 本身跳过包名过滤直接走 HDR 路径。
+     *
+     * 注意：调用自 system_server 进程（android package），安全性已由 kill-switch 保护。
+     */
+    private fun hookMdnieGalleryWhitelist(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val svcCls = XposedHelpers.findClassIfExists(
+                "com.samsung.android.displaysolution.MdnieScenarioControlService",
+                lpparam.classLoader
+            ) ?: return
+
+            // 1. getAppSettingState 被用于判断特性开关，直接让它为任意前台包返回 0（激活状态）
+            XposedBridge.hookAllMethods(svcCls, "getAppSettingState", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    // 原始返回值 0 = enabled，非 0 = disabled
+                    param.result = 0
+                }
+            })
+
+            // 2. mGalleryAppState 字段被检查来决定是否进入 PhotoHDR/Video 路径
+            //    在 setUIMode / setVideoMode 调用前强制置为 true
+            XposedBridge.hookAllMethods(svcCls, "setUIMode", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    runCatching {
+                        XposedHelpers.setBooleanField(param.thisObject, "mGalleryAppState", true)
+                        XposedHelpers.setBooleanField(param.thisObject, "mHighDynamicRangeEnabled", true)
+                        XposedHelpers.setBooleanField(param.thisObject, "mDayOfUseSupportAppState", true)
+                    }
+                }
+            })
+
+            // 3. setVideoMode 也有同样的 gallery 包名检查
+            XposedBridge.hookAllMethods(svcCls, "setVideoMode", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    runCatching {
+                        XposedHelpers.setBooleanField(param.thisObject, "mGalleryAppState", true)
+                        XposedHelpers.setBooleanField(param.thisObject, "mHighDynamicRangeEnabled", true)
+                    }
+                }
+            })
+
+            XposedBridge.log("$TAG: Hooked MdnieScenarioControlService gallery whitelist (all apps enabled)")
+        }.onFailure { XposedBridge.log("$TAG: hookMdnieGalleryWhitelist failed: $it") }
+    }
+
+    private fun setObjectSafe(target: Any, fieldName: String, value: Any?) {
+        runCatching { XposedHelpers.setObjectField(target, fieldName, value) }
+    }
         if (target == null) return null
         return runCatching { XposedHelpers.getObjectField(target, fieldName) }.getOrNull()
     }

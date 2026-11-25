@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  xposed_scope: 仅作为 LSPosed Manager 中「推荐作用域」的默认建议列表。
+  模块代码已无白名单限制：只要在 LSPosed 中勾选任意应用，该应用即可
+  获得 isHdrSdrRatioAvailable=true、Auto-Gainmap 注入和 HDR 窗口。
+  android 进程（system_server）必须勾选以激活核心 Hook。
+-->
 <resources>
     <string-array name="xposed_scope">
         <item>android</item>
-        <item>com.sec.android.gallery3d</item>
-        <item>com.android.settings</item>
-        <item>com.google.android.apps.photos</item>
         <item>com.fold5.superhdr.tester</item>
+        <item>com.sec.android.gallery3d</item>
+        <item>com.google.android.apps.photos</item>
+        <item>com.android.settings</item>
+        <item>com.android.gallery3d</item>
+        <item>com.facebook.katana</item>
+        <item>com.instagram.android</item>
+        <item>com.twitter.android</item>
+        <item>com.snapchat.android</item>
     </string-array>
 </resources>

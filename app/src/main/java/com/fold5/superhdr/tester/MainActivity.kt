@@ -364,7 +364,7 @@ class MainActivity : AppCompatActivity() {
         controls.addView(rootBtnRow)
 
         logOutputView = TextView(this).apply {
-            text = "v3 已内置 LSPosed 模块 (XposedInit)！\n1. 免重启快速测试：点击预览图右上角『扩大视口 (>65% 面积)』可直接跨过三星 minimumHdrPercentOfScreen=0.5 面积锁，立即触发原厂 500->1500nits 激发！\n2. 全局解锁：在 LSPosed 启用本应用并勾选『系统框架 (android)』与三星相册重启，即可彻底解除 50% 窗口面积限制并激活原生 Gainmap。"
+            text = "v4 已适配 Fold 5 (Android 17 / One UI 9) 实机管线！\n1. 免重启快速测试：点击预览图右上角『扩大视口 (>65% 面积)』可直接跨过 50% 面积锁触发原厂 500->1500nits 激发。\n2. 全局解锁：在 LSPosed 启用本模块（勾选 android 与三星相册/设置）重启，即会 Hook DisplayDeviceConfig.initFromGlobalXml() 与 HdrBrightnessModifier (mThresRatio=0 / 省电模式绕过 / 1500nits 曲线)。\n3. 防卡开机救砖：ADB 执行 touch /data/local/tmp/disable_fold5_hdr 即可跳过 system_server Hook。"
             setTextColor(Color.rgb(190, 205, 220))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
@@ -388,7 +388,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun copyToClipboard(content: String) {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-        cm.setPrimaryClip(ClipData.newPlainText("Fold5_HDR_Diag_v3", content))
+        cm.setPrimaryClip(ClipData.newPlainText("Fold5_HDR_Diag_v4", content))
     }
 
     private fun refreshSliderLabels() {

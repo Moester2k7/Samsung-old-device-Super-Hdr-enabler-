@@ -3,7 +3,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Fold5 SuperHDR Lab v3"
+        android:label="Fold5 SuperHDR Lab v4"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
         android:theme="@style/Theme.Material3.Dark.NoActionBar">

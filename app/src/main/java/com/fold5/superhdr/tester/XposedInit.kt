@@ -13,19 +13,38 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.io.File
 import kotlin.math.pow
 
 class XposedInit : IXposedHookLoadPackage {
 
+    companion object {
+        private const val TAG = "Fold5SuperHDR"
+        private const val KILL_SWITCH_PATH = "/data/local/tmp/disable_fold5_hdr"
+    }
+
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // 1. 解锁三星 One UI SemFloatingFeature 中的 PhotoHDR / Super HDR 机型锁
+        if (lpparam.packageName == "android" && File(KILL_SWITCH_PATH).exists()) {
+            XposedBridge.log("$TAG: Safe kill-switch $KILL_SWITCH_PATH exists, skipping system_server hooks")
+            return
+        }
+
+        if (lpparam.packageName == "android" ||
+            lpparam.packageName == "com.sec.android.gallery3d" ||
+            lpparam.packageName == "com.android.settings" ||
+            lpparam.packageName == "com.google.android.apps.photos"
+        ) {
+            XposedBridge.log("$TAG: Loaded in ${lpparam.packageName} (process=${lpparam.processName})")
+        }
+
+        // 1. 解锁三星 One UI SemFloatingFeature 中的 PhotoHDR / HW_HDR / Super HDR 机型锁
         hookSamsungFloatingFeature(lpparam)
 
         // 2. 修复 Fold 5 虚标的 400/450 nits 静态峰值上限 -> 1500 nits (与硬件 sdrToHdrSpline 对齐)
         hookHdrCapabilities()
 
         if (lpparam.packageName == "android") {
-            // 3. 核心突破：在 system_server 解除 50% 屏幕面积门槛，并补全缺失的 sdrToHdrRatioSpline (1->3.0x, 500->3.0x)
+            // 3. 核心突破：针对 Fold 5 (Android 17 / One UI 9) 实机 services.jar 逆向定位的真实拦截链路
             hookSystemServerHdrGatekeepers(lpparam)
         } else if (lpparam.packageName != "com.android.settings" &&
             lpparam.packageName != "com.fold5.superhdr.tester"
@@ -46,6 +65,7 @@ class XposedInit : IXposedHookLoadPackage {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val key = param.args.firstOrNull() as? String ?: return
                     if (key.contains("PHOTOHDR") ||
+                        key.contains("HW_HDR") ||
                         key.contains("SUPER_HDR") ||
                         key.contains("HDR_EFFECT") ||
                         key.contains("ULTRA_HDR")
@@ -63,6 +83,8 @@ class XposedInit : IXposedHookLoadPackage {
                     }
                 }
             })
+        }.onFailure {
+            XposedBridge.log("$TAG: hookSamsungFloatingFeature failed in ${lpparam.packageName}: $it")
         }
     }
 
@@ -82,27 +104,52 @@ class XposedInit : IXposedHookLoadPackage {
                 }
             })
         }
-
-        // 客户端保底：当系统上报 hdrSdrRatio <= 1.01f 时确保 isHdrSdrRatioAvailable 仍能返回 true 供调试对比
-        runCatching {
-            XposedBridge.hookAllMethods(Display::class.java, "isHdrSdrRatioAvailable", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    param.result = true
-                }
-            })
-        }
+        // 注：不再在客户端强制伪造 Display.isHdrSdrRatioAvailable() = true，避免遮蔽 system_server 真实状态；
+        // Fold 5 原生 LocalDisplayAdapter 已开启 mUseSurfaceControlBrightness，在解锁比率曲线后会真实上报 1.0~3.0x。
     }
 
     /**
-     * 针对 Fold 5 诊断报告精确定位的三大拦截点：
-     * 1) HdrBrightnessData: minimumHdrPercentOfScreenForNbm = 0.5 -> 0.0f, minimumHdrPercentOfScreenForHbm = 0.5 -> 0.0f, sdrToHdrRatioSpline = null -> 3.0x Spline
-     * 2) HighBrightnessModeData (HBM): minimumHdrPercentOfScreen = 0.5 -> 0.0f, mSdrToHdrRatioSpline = null -> 3.0x Spline
-     * 3) HighBrightnessModeController / HdrBrightnessModifier: 解除面积校验并返回真实 3.0x 倍率
+     * 基于 Fold 5 (F946BXXU7HZIJ / Android 17 / One UI 9) services.jar 实机反编译的精准拦截点：
+     * 1) DisplayDeviceConfig.initFromGlobalXml(): R8 内联构造 mHbmData (config.HighBrightnessModeData) 与
+     *    mHdrBrightnessData (config.HdrBrightnessData)，直接跳过构造函数；需在 initFromGlobalXml() 返回后修补字段并从
+     *    mSdrNits/mHdrNits 动态生成 sdrToHdrRatioSpline。
+     * 2) HdrBrightnessModifier (Android 15+ 主控模块): 硬编码 mThresRatio=0.9f、且 mLowPowerMode=true 结合
+     *    allowInLowPowerMode=false 会拦截激发；图层事件入口为内部类 HdrBrightnessModifier$1.onHdrInfoChanged。
+     * 3) HighBrightnessModeController & $HdrListener: 同步解除 mThresRatio=0.9f 与 $HdrListener.onHdrInfoChanged。
      */
     private fun hookSystemServerHdrGatekeepers(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val ratioSpline = createFold5HdrRatioSpline(lpparam.classLoader)
+        val fallbackRatioSpline = createFold5HdrRatioSpline(lpparam.classLoader)
 
-        // A. Hook One UI 7 / Android 15 新增的 HdrBrightnessData 配置对象
+        // A1. 核心：Hook DisplayDeviceConfig.initFromGlobalXml() (Fold 5 无 display_id_*.xml 时走此路径且内联构造)
+        runCatching {
+            val ddcCls = XposedHelpers.findClassIfExists(
+                "com.android.server.display.DisplayDeviceConfig",
+                lpparam.classLoader
+            )
+            if (ddcCls != null) {
+                XposedBridge.hookAllMethods(ddcCls, "initFromGlobalXml", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val ddc = param.thisObject ?: return
+                        val hbm = getObjectSafe(ddc, "mHbmData")
+                        val hdr = getObjectSafe(ddc, "mHdrBrightnessData")
+                        val spline = buildRatioSplineFromDdc(ddc, lpparam.classLoader) ?: fallbackRatioSpline
+                        patchHdrDataObjects(hbm, hdr, spline)
+                        XposedBridge.log("$TAG: Patched DisplayDeviceConfig.initFromGlobalXml (hbm=${hbm != null}, hdr=${hdr != null}, spline=${spline != null})")
+                    }
+                })
+                XposedBridge.hookAllMethods(ddcCls, "loadConfigFromDisplayConfigFile", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val ddc = param.thisObject ?: return
+                        val hbm = getObjectSafe(ddc, "mHbmData")
+                        val hdr = getObjectSafe(ddc, "mHdrBrightnessData")
+                        val spline = buildRatioSplineFromDdc(ddc, lpparam.classLoader) ?: fallbackRatioSpline
+                        patchHdrDataObjects(hbm, hdr, spline)
+                    }
+                })
+            }
+        }.onFailure { XposedBridge.log("$TAG: DisplayDeviceConfig hook failed: $it") }
+
+        // A2. 兜底 Hook HdrBrightnessData / HighBrightnessModeData (静态工厂 + 构造函数，包名 config.*)
         runCatching {
             val hdrDataCls = XposedHelpers.findClassIfExists(
                 "com.android.server.display.config.HdrBrightnessData",
@@ -111,106 +158,91 @@ class XposedInit : IXposedHookLoadPackage {
             if (hdrDataCls != null) {
                 XposedBridge.hookAllConstructors(hdrDataCls, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val obj = param.thisObject ?: return
-                        setFloatSafe(obj, "minimumHdrPercentOfScreenForNbm", 0.0f)
-                        setFloatSafe(obj, "minimumHdrPercentOfScreenForHbm", 0.0f)
-                        setFloatSafe(obj, "mMinimumHdrPercentOfScreenForNbm", 0.0f)
-                        setFloatSafe(obj, "mMinimumHdrPercentOfScreenForHbm", 0.0f)
-                        setBooleanSafe(obj, "allowInLowPowerMode", true)
-                        if (ratioSpline != null) {
-                            setObjectIfNullSafe(obj, "sdrToHdrRatioSpline", ratioSpline)
-                            setObjectIfNullSafe(obj, "mSdrToHdrRatioSpline", ratioSpline)
-                        }
-                        XposedBridge.log("Fold5SuperHDR: Patched HdrBrightnessData (0% area limit + 3.0x ratio spline)")
+                        patchHdrDataObjects(null, param.thisObject, fallbackRatioSpline)
+                    }
+                })
+                XposedBridge.hookAllMethods(hdrDataCls, "loadConfig", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        patchHdrDataObjects(null, param.result, fallbackRatioSpline)
                     }
                 })
             }
         }
 
-        // B. Hook DisplayDeviceConfig$HighBrightnessModeData (dumpsys 中的 mHbmData)
-        runCatching {
-            val hbmDataCls = XposedHelpers.findClassIfExists(
-                "com.android.server.display.DisplayDeviceConfig\$HighBrightnessModeData",
-                lpparam.classLoader
-            )
-            if (hbmDataCls != null) {
+        for (hbmClsName in listOf(
+            "com.android.server.display.config.HighBrightnessModeData",
+            "com.android.server.display.DisplayDeviceConfig\$HighBrightnessModeData"
+        )) {
+            runCatching {
+                val hbmDataCls = XposedHelpers.findClassIfExists(hbmClsName, lpparam.classLoader) ?: return@runCatching
                 XposedBridge.hookAllConstructors(hbmDataCls, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val obj = param.thisObject ?: return
-                        setFloatSafe(obj, "minimumHdrPercentOfScreen", 0.0f)
-                        setBooleanSafe(obj, "allowInLowPowerMode", true)
-                        if (ratioSpline != null) {
-                            setObjectIfNullSafe(obj, "mSdrToHdrRatioSpline", ratioSpline)
-                            setObjectIfNullSafe(obj, "sdrToHdrRatioSpline", ratioSpline)
-                        }
-                        XposedBridge.log("Fold5SuperHDR: Patched HighBrightnessModeData (0% area + 3.0x spline)")
+                        patchHdrDataObjects(param.thisObject, null, fallbackRatioSpline)
+                    }
+                })
+                XposedBridge.hookAllMethods(hbmDataCls, "loadHighBrightnessModeData", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        patchHdrDataObjects(param.result, null, fallbackRatioSpline)
                     }
                 })
             }
         }
 
-        // C. Hook DisplayDeviceConfig 的获取方法，防止结构体字段在构造后被覆盖
+        // B. 核心：Hook HdrBrightnessModifier 及其内部 SurfaceControlHdrLayerInfoListener (HdrBrightnessModifier$1)
         runCatching {
-            val ddcCls = XposedHelpers.findClassIfExists(
-                "com.android.server.display.DisplayDeviceConfig",
+            val modCls = XposedHelpers.findClassIfExists(
+                "com.android.server.display.brightness.clamper.HdrBrightnessModifier",
                 lpparam.classLoader
             )
-            if (ddcCls != null) {
-                XposedBridge.hookAllMethods(ddcCls, "getHighBrightnessModeData", object : XC_MethodHook() {
+            if (modCls != null) {
+                val patchModifier = { mod: Any ->
+                    setFloatSafe(mod, "mThresRatio", 0.0f)
+                    setBooleanSafe(mod, "mSupportHdrSolution", true)
+                    setBooleanSafe(mod, "mSupportPhotoHdr", true)
+                    setBooleanSafe(mod, "mLowPowerMode", false)
+                    val ddc = getObjectSafe(mod, "mDisplayDeviceConfig")
+                    val hdrData = getObjectSafe(mod, "mHdrBrightnessData")
+                    val spline = (ddc?.let { buildRatioSplineFromDdc(it, lpparam.classLoader) }) ?: fallbackRatioSpline
+                    patchHdrDataObjects(getObjectSafe(ddc, "mHbmData"), hdrData, spline)
+                }
+                XposedBridge.hookAllConstructors(modCls, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val hbm = param.result ?: return
-                        setFloatSafe(hbm, "minimumHdrPercentOfScreen", 0.0f)
-                        if (ratioSpline != null) {
-                            setObjectIfNullSafe(hbm, "mSdrToHdrRatioSpline", ratioSpline)
-                        }
+                        val mod = param.thisObject ?: return
+                        patchModifier(mod)
+                        XposedBridge.log("$TAG: Patched HdrBrightnessModifier.<init> (mThresRatio=0, lowPowerBypass=true)")
                     }
                 })
-                XposedBridge.hookAllMethods(ddcCls, "getHdrBrightnessData", object : XC_MethodHook() {
+                XposedBridge.hookAllMethods(modCls, "onDisplayChanged", object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val hdrData = param.result ?: return
-                        setFloatSafe(hdrData, "minimumHdrPercentOfScreenForNbm", 0.0f)
-                        setFloatSafe(hdrData, "minimumHdrPercentOfScreenForHbm", 0.0f)
-                        if (ratioSpline != null) {
-                            setObjectIfNullSafe(hdrData, "sdrToHdrRatioSpline", ratioSpline)
-                        }
+                        val mod = param.thisObject ?: return
+                        patchModifier(mod)
                     }
                 })
-                XposedBridge.hookAllMethods(ddcCls, "getSdrToHdrRatio", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val cur = (param.result as? Float) ?: return
-                        if (cur.isNaN() || cur <= 1.01f) {
-                            param.result = 3.0f
-                        }
-                    }
-                })
-            }
-        }
-
-        // D. Hook HighBrightnessModeController，解除窗口尺寸拦截并激活 getHdrSdrRatio()
-        runCatching {
-            val hbmCtrlCls = XposedHelpers.findClassIfExists(
-                "com.android.server.display.HighBrightnessModeController",
-                lpparam.classLoader
-            )
-            if (hbmCtrlCls != null) {
-                XposedBridge.hookAllConstructors(hbmCtrlCls, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val ctrl = param.thisObject ?: return
-                        setFloatSafe(ctrl, "mMinHdrPercentOfScreen", 0.0f)
-                    }
-                })
-                XposedBridge.hookAllMethods(hbmCtrlCls, "getHdrSdrRatio", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val r = (param.result as? Float) ?: return
-                        if (r.isNaN() || r <= 1.01f) {
-                            param.result = 3.0f
-                        }
-                    }
-                })
-                // 拦截 onHdrInfoChanged(IBinder, int numberOfHdrLayers, int maxW, int maxH, int flags, float desiredMaxHdrRatio)
-                // 当存在 HDR 图层 (numberOfHdrLayers > 0) 但小窗口面积不足 50% 时，把上报宽高放大至全屏尺寸以原生触发三星 1500nits 硬件曲线！
-                XposedBridge.hookAllMethods(hbmCtrlCls, "onHdrInfoChanged", object : XC_MethodHook() {
+                XposedBridge.hookAllMethods(modCls, "recalculateMode", object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        val mod = param.thisObject ?: return
+                        setFloatSafe(mod, "mThresRatio", 0.0f)
+                        setBooleanSafe(mod, "mLowPowerMode", false)
+                        setBooleanSafe(mod, "mHdrBrightnessEnabled", true)
+                        val hdrArg = param.args.firstOrNull()
+                        if (hdrArg != null) {
+                            patchHdrDataObjects(null, hdrArg, fallbackRatioSpline)
+                        }
+                    }
+                })
+            }
+        }.onFailure { XposedBridge.log("$TAG: HdrBrightnessModifier hook failed: $it") }
+
+        // C. Hook HdrBrightnessModifier$1 与 HighBrightnessModeController$HdrListener 的 onHdrInfoChanged
+        for (listenerClsName in listOf(
+            "com.android.server.display.brightness.clamper.HdrBrightnessModifier\$1",
+            "com.android.server.display.HighBrightnessModeController\$HdrListener"
+        )) {
+            runCatching {
+                val listenerCls = XposedHelpers.findClassIfExists(listenerClsName, lpparam.classLoader) ?: return@runCatching
+                XposedBridge.hookAllMethods(listenerCls, "onHdrInfoChanged", object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        // 签名: (IBinder displayToken, int numberOfHdrLayers, int maxW, int maxH, int flags, float maxDesiredHdrSdrRatio)
                         if (param.args.size >= 4) {
                             val numLayers = param.args[1] as? Int ?: 0
                             if (numLayers > 0) {
@@ -220,41 +252,82 @@ class XposedInit : IXposedHookLoadPackage {
                         }
                     }
                 })
+                XposedBridge.log("$TAG: Hooked $listenerClsName.onHdrInfoChanged")
             }
         }
 
-        // E. 同步拦截 Android 15 HdrClamper / HdrBrightnessModifier 的 HDR 图层面积事件
-        for (clsName in listOf(
-            "com.android.server.display.brightness.clamper.HdrClamper",
-            "com.android.server.display.brightness.clamper.HdrBrightnessModifier"
-        )) {
-            runCatching {
-                val cls = XposedHelpers.findClassIfExists(clsName, lpparam.classLoader) ?: return@runCatching
-                XposedBridge.hookAllMethods(cls, "onHdrInfoChanged", object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        for (i in param.args.indices) {
-                            // 查找连续的 (numHdrLayers, maxW, maxH) 参数签名
-                            if (i + 2 < param.args.size &&
-                                param.args[i] is Int &&
-                                param.args[i + 1] is Int &&
-                                param.args[i + 2] is Int
-                            ) {
-                                val layers = param.args[i] as Int
-                                if (layers > 0) {
-                                    param.args[i + 1] = 2176
-                                    param.args[i + 2] = 2316
-                                }
-                                break
-                            }
-                        }
+        // D. 同步修补 HighBrightnessModeController (mThresRatio=0.0f / mSupportHdrSolution / mSupportPhotoHdr)
+        runCatching {
+            val hbmCtrlCls = XposedHelpers.findClassIfExists(
+                "com.android.server.display.HighBrightnessModeController",
+                lpparam.classLoader
+            )
+            if (hbmCtrlCls != null) {
+                val patchHbmCtrl = { ctrl: Any ->
+                    setFloatSafe(ctrl, "mThresRatio", 0.0f)
+                    setBooleanSafe(ctrl, "mSupportHdrSolution", true)
+                    setBooleanSafe(ctrl, "mSupportPhotoHdr", true)
+                    setBooleanSafe(ctrl, "mIsBlockedByLowPowerMode", false)
+                    patchHdrDataObjects(getObjectSafe(ctrl, "mHbmData"), null, fallbackRatioSpline)
+                }
+                XposedBridge.hookAllConstructors(hbmCtrlCls, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val ctrl = param.thisObject ?: return
+                        patchHbmCtrl(ctrl)
                     }
                 })
+                XposedBridge.hookAllMethods(hbmCtrlCls, "resetHbmData", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val ctrl = param.thisObject ?: return
+                        patchHbmCtrl(ctrl)
+                    }
+                })
+            }
+        }.onFailure { XposedBridge.log("$TAG: HighBrightnessModeController hook failed: $it") }
+    }
+
+    private fun patchHdrDataObjects(hbmData: Any?, hdrData: Any?, ratioSpline: Any?) {
+        if (hdrData != null) {
+            setFloatSafe(hdrData, "minimumHdrPercentOfScreenForNbm", 0.0f)
+            setFloatSafe(hdrData, "minimumHdrPercentOfScreenForHbm", 0.0f)
+            setFloatSafe(hdrData, "mMinimumHdrPercentOfScreenForNbm", 0.0f)
+            setFloatSafe(hdrData, "mMinimumHdrPercentOfScreenForHbm", 0.0f)
+            setBooleanSafe(hdrData, "allowInLowPowerMode", true)
+            val curHighest = (getObjectSafe(hdrData, "highestHdrSdrRatio") as? Float) ?: 1.0f
+            if (curHighest < 3.0f) {
+                setFloatSafe(hdrData, "highestHdrSdrRatio", 3.0f)
+            }
+            if (ratioSpline != null) {
+                setObjectIfNullSafe(hdrData, "sdrToHdrRatioSpline", ratioSpline)
+                setObjectIfNullSafe(hdrData, "mSdrToHdrRatioSpline", ratioSpline)
+            }
+        }
+        if (hbmData != null) {
+            setFloatSafe(hbmData, "minimumHdrPercentOfScreen", 0.0f)
+            setBooleanSafe(hbmData, "allowInLowPowerMode", true)
+            if (ratioSpline != null) {
+                setObjectIfNullSafe(hbmData, "sdrToHdrRatioSpline", ratioSpline)
+                setObjectIfNullSafe(hbmData, "mSdrToHdrRatioSpline", ratioSpline)
             }
         }
     }
 
+    private fun buildRatioSplineFromDdc(ddc: Any, classLoader: ClassLoader): Any? {
+        return runCatching {
+            val sdrNits = getObjectSafe(ddc, "mSdrNits") as? FloatArray ?: return null
+            val hdrNits = getObjectSafe(ddc, "mHdrNits") as? FloatArray ?: return null
+            if (sdrNits.isEmpty() || sdrNits.size != hdrNits.size) return null
+            val ratios = FloatArray(sdrNits.size) { idx ->
+                val s = sdrNits[idx].coerceAtLeast(0.1f)
+                (hdrNits[idx] / s).coerceAtLeast(1.0f)
+            }
+            val splineCls = XposedHelpers.findClass("android.util.Spline", classLoader)
+            XposedHelpers.callStaticMethod(splineCls, "createLinearSpline", sdrNits, ratios)
+        }.getOrNull()
+    }
+
     /**
-     * 构造与 Fold 5 原厂硬件 sdrToHdrSpline [(1->3), (500->1500), (1500->1500)] 完全匹配的 Ratio Spline:
+     * 构造与 Fold 5 原厂硬件 sdrToHdrSpline [(1->3), (500->1500), (1500->1500), (2500->2500)] 匹配的兜底 Ratio Spline:
      * SDR 1~500 nits 区间输出 3.0x 倍率 (最高 1500 nits)，户外 1500 nits HBM 下平滑收敛至 1.0x
      */
     private fun createFold5HdrRatioSpline(classLoader: ClassLoader): Any? {
@@ -348,6 +421,11 @@ class XposedInit : IXposedHookLoadPackage {
                 minDisplayRatioForHdrTransition = 1.02f
             }
         }
+    }
+
+    private fun getObjectSafe(target: Any?, fieldName: String): Any? {
+        if (target == null) return null
+        return runCatching { XposedHelpers.getObjectField(target, fieldName) }.getOrNull()
     }
 
     private fun setFloatSafe(target: Any, fieldName: String, value: Float) {

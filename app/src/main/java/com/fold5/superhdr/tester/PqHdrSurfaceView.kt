@@ -139,10 +139,10 @@ class PqHdrSurfaceView @JvmOverloads constructor(
     }
 
     private class PqRenderer : Renderer {
-        var enableHdr: Boolean = true
-        var peakBoost: Float = 3.0f
-        var threshold: Float = 0.68f
-        var splitRatio: Float = 0.50f
+        @Volatile var enableHdr: Boolean = true
+        @Volatile var peakBoost: Float = 3.0f
+        @Volatile var threshold: Float = 0.68f
+        @Volatile var splitRatio: Float = 0.50f
 
         private var pendingBitmap: Bitmap? = null
         private var textureId: Int = 0

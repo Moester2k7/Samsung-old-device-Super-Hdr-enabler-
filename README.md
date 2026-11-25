@@ -1,13 +1,13 @@
-# Fold5 SuperHDR Lab v3 (LSPosed 模块 + 双引擎测试台)
+# Fold5 SuperHDR Lab v4 (LSPosed 模块 + 双引擎测试台)
 
-针对三星 **Galaxy Z Fold 5** 实机 `dumpsys display` 逆向分析定制的 **v3 一体化版本**。
+针对三星 **Galaxy Z Fold 5 (`SM-F946B` / `F946BXXU7HZIJ`, Android 17 / One UI 9)** 实机 `services.jar`、`SecGallery`、`SecSettings` 反编译逆向分析定制的 **v4 版本**。
 
-## 实机锁定根因与 v3 破解方案
-1. **50% 屏幕面积锁 (`minimumHdrPercentOfScreen = 0.5`)**：
-   - 实机 `mHbmData` 与 `mHdrBrightnessData` 内置了完整的 `sdrToHdrSpline: [(1->3), (500->1500)]`（最高 **1500 nits / 3.0x** 硬件激发），但三星强行限制 HDR 图层必须占全屏面积 **50% 以上**才放行激发。
-   - **v3 突破**：`XposedInit` 在 `system_server` 中将 `minimumHdrPercentOfScreen` / `minimumHdrPercentOfScreenForNbm` / `ForHbm` 全部归零，并拦截 `onHdrInfoChanged` 让任意小尺寸窗口或相册缩略图都能触发硬件激发。
-2. **原生 Gainmap 倍率曲线空缺 (`sdrToHdrRatioSpline = null`)**：
-   - 三星保留了视频用的 `sdrToHdrSpline`，但把静态照片 Ultra HDR 专用的 `sdrToHdrRatioSpline` 留空为 `null`，导致 `hdrSdrRatio` 恒为 `1.0`。
-   - **v3 突破**：动态构造 `Spline.createLinearSpline`（`1~500 nits -> 3.0x`）注入到 `HdrBrightnessData` 与 `HighBrightnessModeData` 中，并解除 `400/450 nits` 虚标上限至 `1500 nits`。
-3. **自动导出与剪贴板复制**：
-   - 点击「1. 诊断并自动导出/复制日志」会自动将完整报告保存至 `/sdcard/Download/fold5_hdr_diag_v3.txt` 并复制到系统剪贴板，日志框同时支持自由长按选词。
+## 实机锁定根因与 v4 破解方案
+1. **R8 内联构造导致 v3 构造 Hook 失效 (`DisplayDeviceConfig.initFromGlobalXml`)**：
+   - Fold 5 无 `/vendor/etc/displayconfig/display_id_*.xml`，`DisplayDeviceConfig` 走 `initFromGlobalXml()`，其中 R8 将 `config.HighBrightnessModeData`（非旧包名 `DisplayDeviceConfig$HighBrightnessModeData`）与 `config.HdrBrightnessData` 内联为 `Object.<init>()` 后直接 `iput` 字段。
+   - **v4 突破**：直接在 `DisplayDeviceConfig.initFromGlobalXml()` 返回后修补 `mHbmData` / `mHdrBrightnessData`，并从实机 `mSdrNits` / `mHdrNits` 动态构造 `sdrToHdrRatioSpline`（兜底 `1~500 nits -> 3.0x`）。
+2. **Android 15+ 真实主控门槛 (`HdrBrightnessModifier` `mThresRatio = 0.9` 与省电模式拦截)**：
+   - 实机 `HighBrightnessModeController` 处于 `mHdrBoostDisabled=true`，真正驱动局部激发的是 `HdrBrightnessModifier`。因 `SurfaceFlinger` `1135` 返回 `0` (`mSDRDimming=0`)，其硬编码 `mThresRatio = 0.9f`，且 `onHdrInfoChanged` 位于内部类 `HdrBrightnessModifier$1` 与 `HighBrightnessModeController$HdrListener`；同时 `low_power=1` + `allowInLowPowerMode=false` 会直接拦截为 `NO_HDR`。
+   - **v4 突破**：归零 `HdrBrightnessModifier` 与 `HighBrightnessModeController` 的 `mThresRatio`，开启 `allowInLowPowerMode=true` 与 `mSupportHdrSolution/mSupportPhotoHdr`，并拦截 `$1` 与 `$HdrListener` 的 `onHdrInfoChanged` 放行任意尺寸图层。
+3. **安全救砖与实机诊断**：
+   - 若因系统更新导致 `system_server` 异常，可在开机/Recovery ADB 中执行 `touch /data/local/tmp/disable_fold5_hdr` 立即跳过 `system_server` Hook；点击「1. 诊断并自动导出/复制日志」会保存至 `/sdcard/Download/fold5_hdr_diag_v4.txt` 并复制到剪贴板。

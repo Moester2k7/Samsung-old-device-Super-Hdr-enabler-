@@ -443,7 +443,7 @@ class XposedInit : IXposedHookLoadPackage {
             val svcCls = XposedHelpers.findClassIfExists(
                 "com.samsung.android.displaysolution.MdnieScenarioControlService",
                 lpparam.classLoader
-            ) ?: return
+            ) ?: return@runCatching
 
             // 1. getAppSettingState 被用于判断特性开关，直接让它为任意前台包返回 0（激活状态）
             XposedBridge.hookAllMethods(svcCls, "getAppSettingState", object : XC_MethodHook() {
@@ -482,6 +482,8 @@ class XposedInit : IXposedHookLoadPackage {
     private fun setObjectSafe(target: Any, fieldName: String, value: Any?) {
         runCatching { XposedHelpers.setObjectField(target, fieldName, value) }
     }
+
+    private fun getObjectSafe(target: Any?, fieldName: String): Any? {
         if (target == null) return null
         return runCatching { XposedHelpers.getObjectField(target, fieldName) }.getOrNull()
     }

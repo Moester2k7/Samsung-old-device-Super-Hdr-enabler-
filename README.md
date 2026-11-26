@@ -1,3 +1,4 @@
+##Eol because screen hardware does not support local brightness control 
 # Fold5 SuperHDR Lab v4 (LSPosed 模块 + 双引擎测试台)
 
 针对三星 **Galaxy Z Fold 5 (`SM-F946B` / `F946BXXU7HZIJ`, Android 17 / One UI 9)** 实机 `services.jar`、`SecGallery`、`SecSettings` 反编译逆向分析定制的 **v4 版本**。
